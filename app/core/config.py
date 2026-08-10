@@ -3,6 +3,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str
+    telegram_bot_token: str
+
+    ollama_host: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:3b"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -12,3 +16,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+

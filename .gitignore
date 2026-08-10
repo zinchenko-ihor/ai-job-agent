@@ -4,12 +4,14 @@
 
 # Python
 __pycache__/
+*.pyc
 *.py[cod]
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .venv/
 venv/
+storage/
 
 # IDE
 .vscode/
@@ -33,3 +35,7 @@ logs/
 
 # Ollama
 ollama_data/
+
+# Backup files
+*.old
+1.sh

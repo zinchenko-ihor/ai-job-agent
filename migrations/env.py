@@ -5,7 +5,16 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
 from app.db.session import Base
-from app.models import UserProfile
+#from app.models import Job, JobMatch, JobSource, UserProfile
+from app.models import (
+    Job,
+    JobMatch,
+    JobSkill,
+    JobSource,
+    Skill,
+    UserProfile,
+    UserSkill,
+)
 
 config = context.config
 
