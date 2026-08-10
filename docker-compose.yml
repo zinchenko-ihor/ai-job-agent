@@ -1,9 +1,7 @@
 services:
 
   ai-job-agent:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: jumper93/ai-job-agent:latest
 
     container_name: ai-job-agent
 
@@ -33,9 +31,7 @@ services:
 
 
   job-collector:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: jumper93/ai-job-agent:latest
 
     container_name: ai-job-agent-collector
 
