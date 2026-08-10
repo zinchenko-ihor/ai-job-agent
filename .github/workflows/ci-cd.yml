@@ -31,7 +31,7 @@ jobs:
 
       - name: Run tests
         env:
-          DATABASE_URL: postgresql://test:test@localhost:5432/test
+          DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/test
           TELEGRAM_BOT_TOKEN: test-token
           OLLAMA_HOST: http://localhost:11434
           OLLAMA_MODEL: qwen2.5:3b
