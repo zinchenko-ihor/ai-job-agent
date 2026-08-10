@@ -1,9 +1,9 @@
-name: CD
+name: CD - Deploy to Production
 
 on:
   workflow_run:
     workflows:
-      - "CI"
+      - "CI/CD"
     types:
       - completed
     branches:
@@ -12,29 +12,47 @@ on:
 jobs:
   deploy:
     name: Deploy to Production
+
     runs-on:
       - self-hosted
       - production
 
-    # Deploy only if CI/CD completed successfully
     if: >
       github.event.workflow_run.conclusion == 'success'
 
     steps:
-      # ---------------------------------------------------------
-      # 1. Checkout repository
-      # ---------------------------------------------------------
-      - name: Checkout repository
-        uses: actions/checkout@v4
 
       # ---------------------------------------------------------
-      # 2. Verify Docker
+      # 1. Go to production application directory
       # ---------------------------------------------------------
-      - name: Check Docker
+      - name: Go to production directory
         run: |
-          docker --version
-          docker compose version
-          docker info
+          cd /home/zincheis/projects/ai-job-agent
+
+          echo "Production directory:"
+          pwd
+
+          echo
+          echo "Files:"
+          ls -la
+
+      # ---------------------------------------------------------
+      # 2. Verify production environment
+      # ---------------------------------------------------------
+      - name: Verify production environment
+        working-directory: /home/zincheis/projects/ai-job-agent
+        run: |
+          if [ ! -f .env ]; then
+            echo "ERROR: Production .env not found!"
+            exit 1
+          fi
+
+          if [ ! -f docker-compose.yml ]; then
+            echo "ERROR: docker-compose.yml not found!"
+            exit 1
+          fi
+
+          echo "Production environment is OK."
 
       # ---------------------------------------------------------
       # 3. Login to Docker Hub
@@ -46,16 +64,18 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # ---------------------------------------------------------
-      # 4. Pull latest production image
+      # 4. Pull latest image
       # ---------------------------------------------------------
       - name: Pull latest image
+        working-directory: /home/zincheis/projects/ai-job-agent
         run: |
           docker pull jumper93/ai-job-agent:latest
 
       # ---------------------------------------------------------
-      # 5. Deploy application
+      # 5. Deploy
       # ---------------------------------------------------------
       - name: Deploy application
+        working-directory: /home/zincheis/projects/ai-job-agent
         run: |
           docker compose pull
           docker compose up -d --remove-orphans
@@ -64,33 +84,36 @@ jobs:
       # 6. Show container status
       # ---------------------------------------------------------
       - name: Check containers
+        working-directory: /home/zincheis/projects/ai-job-agent
         run: |
           docker compose ps
 
       # ---------------------------------------------------------
-      # 7. Wait for application startup
+      # 7. Wait for startup
       # ---------------------------------------------------------
       - name: Wait for application
         run: |
-          echo "Waiting for application to start..."
+          echo "Waiting for application startup..."
           sleep 10
 
       # ---------------------------------------------------------
-      # 8. Verify container is running
+      # 8. Health check
       # ---------------------------------------------------------
       - name: Health check
+        working-directory: /home/zincheis/projects/ai-job-agent
         run: |
           if [ "$(docker inspect -f '{{.State.Running}}' ai-job-agent)" != "true" ]; then
-            echo "Container is not running!"
-            docker compose logs --tail=100
+            echo "ERROR: ai-job-agent container is not running!"
+            docker compose logs --tail=100 ai-job-agent
             exit 1
           fi
 
-          echo "Application is running successfully."
+          echo "ai-job-agent is running."
 
       # ---------------------------------------------------------
-      # 9. Show application logs
+      # 9. Show logs
       # ---------------------------------------------------------
       - name: Show recent logs
+        working-directory: /home/zincheis/projects/ai-job-agent
         run: |
           docker compose logs --tail=50 ai-job-agent
