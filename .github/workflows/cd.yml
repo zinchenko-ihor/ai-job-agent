@@ -1,6 +1,11 @@
 name: CD
 
 on:
+
+  # =========================================================
+  # Automatic deployment after successful CI
+  # =========================================================
+
   workflow_run:
     workflows:
       - "CI"
@@ -9,26 +14,48 @@ on:
     branches:
       - main
 
+  # =========================================================
+  # Manual deployment / rollback
+  # =========================================================
+
+  workflow_dispatch:
+    inputs:
+
+      version:
+        description: "Docker image version to deploy (example: 1.0.8)"
+        required: true
+        type: string
+
 jobs:
+
+  # =========================================================
+  # DEPLOY
+  # =========================================================
+
   deploy:
+
     name: Deploy to Production
 
     runs-on:
       - self-hosted
       - production
 
+    # Automatic deployment only when CI succeeded.
+    # Manual workflow_dispatch always runs.
+
     if: >
+      github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
 
     steps:
 
-      # ---------------------------------------------------------
-      # 1. Go to production application directory
-      # ---------------------------------------------------------
-      - name: Go to production directory
-        run: |
-          cd /home/zincheis/projects/ai-job-agent
+      # =======================================================
+      # 1. Production directory
+      # =======================================================
 
+      - name: Verify production directory
+        working-directory: /home/zincheis/projects/ai-job-agent
+        run: |
           echo "Production directory:"
           pwd
 
@@ -36,12 +63,14 @@ jobs:
           echo "Files:"
           ls -la
 
-      # ---------------------------------------------------------
+      # =======================================================
       # 2. Verify production environment
-      # ---------------------------------------------------------
+      # =======================================================
+
       - name: Verify production environment
         working-directory: /home/zincheis/projects/ai-job-agent
         run: |
+
           if [ ! -f .env ]; then
             echo "ERROR: Production .env not found!"
             exit 1
@@ -54,66 +83,337 @@ jobs:
 
           echo "Production environment is OK."
 
-      # ---------------------------------------------------------
-      # 3. Login to Docker Hub
-      # ---------------------------------------------------------
+      # =======================================================
+      # 3. Determine version
+      # =======================================================
+
+      - name: Determine deployment version
+        id: version
+        working-directory: /home/zincheis/projects/ai-job-agent
+        run: |
+
+          # ---------------------------------------------------
+          # Manual deployment
+          # ---------------------------------------------------
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+
+            VERSION="${{ inputs.version }}"
+
+          # ---------------------------------------------------
+          # Automatic deployment
+          # ---------------------------------------------------
+
+          else
+
+            git fetch --tags --force
+
+            TAG=$(git tag --sort=-v:refname | head -n 1)
+
+            if [ -z "$TAG" ]; then
+              echo "ERROR: No Git tags found."
+              exit 1
+            fi
+
+            VERSION="${TAG#v}"
+
+          fi
+
+          # ---------------------------------------------------
+          # Validate semantic version
+          # ---------------------------------------------------
+
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: Invalid version: $VERSION"
+            echo "Expected format: X.Y.Z"
+            exit 1
+          fi
+
+          echo "Deploying version: $VERSION"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # =======================================================
+      # 4. Login to Docker Hub
+      # =======================================================
+
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # ---------------------------------------------------------
-      # 4. Pull latest image
-      # ---------------------------------------------------------
-      - name: Pull latest image
+      # =======================================================
+      # 5. Save current production version
+      # =======================================================
+
+      - name: Save current production version
+        id: previous
         working-directory: /home/zincheis/projects/ai-job-agent
         run: |
-          docker pull jumper93/ai-job-agent:latest
 
-      # ---------------------------------------------------------
-      # 5. Deploy
-      # ---------------------------------------------------------
+          CURRENT_VERSION=""
+
+          if [ -f .deploy_version ]; then
+            CURRENT_VERSION=$(cat .deploy_version)
+          fi
+
+          if [ -z "$CURRENT_VERSION" ]; then
+
+            CURRENT_IMAGE=$(docker inspect \
+              -f '{{.Config.Image}}' \
+              ai-job-agent 2>/dev/null || true)
+
+            if echo "$CURRENT_IMAGE" | grep -Eq ':[0-9]+\.[0-9]+\.[0-9]+$'; then
+              CURRENT_VERSION="${CURRENT_IMAGE##*:}"
+            fi
+
+          fi
+
+          if [ -n "$CURRENT_VERSION" ]; then
+            echo "Previous version: $CURRENT_VERSION"
+          else
+            echo "No previous version detected."
+          fi
+
+          echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+
+      # =======================================================
+      # 6. Pull requested version
+      # =======================================================
+
+      - name: Pull application image
+        working-directory: /home/zincheis/projects/ai-job-agent
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          echo "Pulling:"
+          echo "jumper93/ai-job-agent:${APP_VERSION}"
+
+          docker pull "jumper93/ai-job-agent:${APP_VERSION}"
+
+      # =======================================================
+      # 7. Verify Docker Compose configuration
+      # =======================================================
+
+      - name: Validate Docker Compose
+        working-directory: /home/zincheis/projects/ai-job-agent
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          docker compose config
+
+      # =======================================================
+      # 8. Run database migrations
+      # =======================================================
+
+      - name: Run database migrations
+        working-directory: /home/zincheis/projects/ai-job-agent
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          echo "Running Alembic migrations..."
+
+          docker compose run \
+            --rm \
+            --no-deps \
+            ai-job-agent \
+            alembic upgrade head
+
+          echo "Migrations completed successfully."
+
+      # =======================================================
+      # 9. Deploy application
+      # =======================================================
+
       - name: Deploy application
         working-directory: /home/zincheis/projects/ai-job-agent
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          docker compose pull
-          docker compose up -d --remove-orphans
 
-      # ---------------------------------------------------------
-      # 6. Show container status
-      # ---------------------------------------------------------
-      - name: Check containers
+          echo "Deploying version ${APP_VERSION}"
+
+          docker compose up \
+            -d \
+            --remove-orphans
+
+      # =======================================================
+      # 10. Save deployed version
+      # =======================================================
+
+      - name: Save deployed version
+        working-directory: /home/zincheis/projects/ai-job-agent
+        env:
+          APP_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          echo "$APP_VERSION" > .deploy_version
+
+          echo "Current production version:"
+          cat .deploy_version
+
+      # =======================================================
+      # 11. Show containers
+      # =======================================================
+
+      - name: Show container status
         working-directory: /home/zincheis/projects/ai-job-agent
         run: |
+
           docker compose ps
 
-      # ---------------------------------------------------------
-      # 7. Wait for startup
-      # ---------------------------------------------------------
-      - name: Wait for application
-        run: |
-          echo "Waiting for application startup..."
-          sleep 10
+      # =======================================================
+      # 12. Wait for startup
+      # =======================================================
 
-      # ---------------------------------------------------------
-      # 8. Health check
-      # ---------------------------------------------------------
+      - name: Wait for application startup
+        run: |
+
+          echo "Waiting for application startup..."
+
+          sleep 20
+
+      # =======================================================
+      # 13. Health check
+      # =======================================================
+
       - name: Health check
+        id: health
         working-directory: /home/zincheis/projects/ai-job-agent
         run: |
-          if [ "$(docker inspect -f '{{.State.Running}}' ai-job-agent)" != "true" ]; then
-            echo "ERROR: ai-job-agent container is not running!"
+
+          echo "Checking ai-job-agent..."
+
+          STATUS=$(docker inspect \
+            -f '{{.State.Status}}' \
+            ai-job-agent 2>/dev/null || echo "missing")
+
+          if [ "$STATUS" != "running" ]; then
+
+            echo "ERROR: ai-job-agent is not running!"
+
+            docker compose ps
+
+            echo
+            echo "Application logs:"
             docker compose logs --tail=100 ai-job-agent
+
             exit 1
           fi
 
-          echo "ai-job-agent is running."
 
-      # ---------------------------------------------------------
-      # 9. Show logs
-      # ---------------------------------------------------------
-      - name: Show recent logs
+          echo "Checking Docker health status..."
+
+          HEALTH=$(docker inspect \
+            -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+            ai-job-agent)
+
+          echo "Health status: $HEALTH"
+
+          if [ "$HEALTH" = "unhealthy" ]; then
+
+            echo "ERROR: ai-job-agent is unhealthy!"
+
+            docker compose logs --tail=100 ai-job-agent
+
+            exit 1
+          fi
+
+
+          echo "Checking job collector..."
+
+          COLLECTOR_STATUS=$(docker inspect \
+            -f '{{.State.Status}}' \
+            ai-job-agent-collector 2>/dev/null || echo "missing")
+
+          if [ "$COLLECTOR_STATUS" != "running" ]; then
+
+            echo "ERROR: job collector is not running!"
+
+            docker compose logs --tail=100 job-collector
+
+            exit 1
+          fi
+
+
+          echo
+          echo "======================================"
+          echo "Deployment health check PASSED"
+          echo "======================================"
+
+      # =======================================================
+      # 14. Show logs
+      # =======================================================
+
+      - name: Show application logs
+        if: always()
         working-directory: /home/zincheis/projects/ai-job-agent
         run: |
-          docker compose logs --tail=50 ai-job-agent
+
+          echo "=== AI JOB AGENT LOGS ==="
+
+          docker compose logs \
+            --tail=50 \
+            ai-job-agent
+
+          echo
+          echo "=== JOB COLLECTOR LOGS ==="
+
+          docker compose logs \
+            --tail=50 \
+            job-collector
+
+      # =======================================================
+      # 15. Rollback on deployment failure
+      # =======================================================
+
+      - name: Rollback application
+        if: failure() && steps.previous.outputs.version != ''
+        working-directory: /home/zincheis/projects/ai-job-agent
+        env:
+          APP_VERSION: ${{ steps.previous.outputs.version }}
+        run: |
+
+          echo "======================================"
+          echo "DEPLOYMENT FAILED"
+          echo "Starting application rollback"
+          echo "Rollback version: ${APP_VERSION}"
+          echo "======================================"
+
+          docker pull \
+            "jumper93/ai-job-agent:${APP_VERSION}"
+
+          docker compose up \
+            -d \
+            --remove-orphans
+
+          echo "$APP_VERSION" > .deploy_version
+
+          echo
+          echo "Rollback completed."
+
+          docker compose ps
+
+      # =======================================================
+      # 16. Final result
+      # =======================================================
+
+      - name: Deployment summary
+        if: success()
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+
+          echo
+          echo "======================================"
+          echo "DEPLOYMENT SUCCESSFUL"
+          echo "======================================"
+          echo "Version: ${VERSION}"
+          echo "Docker: jumper93/ai-job-agent:${VERSION}"
+          echo
+          echo "Production is running."
+          echo "======================================"
